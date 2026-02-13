@@ -1,0 +1,25 @@
+# Core ML
+torch
+torchvision
+transformers
+diffusers
+accelerate
+
+# Image processing
+opencv-python
+pillow
+numpy
+
+# API & utilities
+openai
+pydantic
+python-dotenv
+
+# UI & monitoring
+gradio
+watchdog
+
+# Development
+pytest
+jupyter
+black
