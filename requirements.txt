@@ -15,6 +15,9 @@ openai
 pydantic
 python-dotenv
 
+# Evaluation
+ultralytics  # YOLOv8 for object detection verification
+
 # UI & monitoring
 gradio
 watchdog
@@ -23,3 +26,4 @@ watchdog
 pytest
 jupyter
 black
+matplotlib

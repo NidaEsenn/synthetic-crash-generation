@@ -1,1 +1,1 @@
-from config.schema import CrashScenario, Weather, IncidentType
+from config.schema import CrashScenario, Weather, IncidentType, SceneObject
