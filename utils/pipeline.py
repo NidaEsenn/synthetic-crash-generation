@@ -291,8 +291,13 @@ class CrashScenePipeline:
             print(f"# Scenario {i+1}/{len(reports)}: {name}")
             print(f"# Report: {report}")
             print(f"{'#'*60}")
-            result = self.run(report, scenario_name=name)
-            results.append(result)
+            try:
+                result = self.run(report, scenario_name=name)
+                results.append(result)
+            except Exception as e:
+                print(f"\n  ERROR in {name}: {e}")
+                print(f"  Skipping to next scenario...")
+                results.append({"scenario_name": name, "error": str(e)})
 
         # Summary
         print(f"\n{'='*60}")

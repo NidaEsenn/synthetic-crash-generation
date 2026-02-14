@@ -34,7 +34,7 @@ class LLMParser:
 Convert crash reports into JSON with these fields:
 
 BASIC FIELDS:
-- ego_speed_mps: speed in meters/second (convert mph * 0.44704)
+- ego_speed_mps: speed in meters/second (compute mph × 0.44704 yourself and output the numeric result — NO math expressions, just the number)
 - ego_action: "going_straight", "turning_left", "turning_right", "changing_lanes"
 - weather: "clear", "rain", "snow", "fog", "night"
 - lighting: "day", "dusk", "dawn", "night"
@@ -62,7 +62,7 @@ TEMPORAL DESCRIPTION:
 IMAGE PROMPT:
 - image_prompt: A detailed Stable Diffusion prompt starting with "dashcam photo, point of view from inside a car, photorealistic, RAW photo, sharp focus" then describing the specific scene with weather, lighting, road, and object positions. Max 120 words.
 
-Return ONLY valid JSON, no explanation."""
+CRITICAL: All numeric values must be plain numbers (e.g. 13.41, not "30 * 0.44704"). No math expressions in JSON. Return ONLY valid JSON, no explanation."""
 
         try:
             response = self.client.chat.completions.create(
