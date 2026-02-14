@@ -8,25 +8,24 @@ warnings.filterwarnings("ignore")
 
 
 class ControlNetGenerator:
-    """Depth-conditioned image generation using ControlNet + SDXL.
+    """Depth-conditioned image generation using ControlNet + SDXL + optional IP-Adapter.
 
-    Solves the core problem: raw SDXL generates generic road scenes and ignores
-    object placement from prompts. By conditioning on a depth map, we tell the
-    diffusion model WHERE in 3D space objects should appear.
+    Multi-signal conditioning stack:
+    - ControlNet: spatial layout from depth map (WHERE objects appear)
+    - SDXL: photorealistic image generation (WHAT things look like)
+    - IP-Adapter (arxiv 2308.06721): reference image style transfer (HOW it looks)
+      Transfers dashcam-specific qualities (lens distortion, color cast, exposure)
+      from real reference images. Only 22M params (+2GB VRAM).
 
-    Why depth conditioning works:
-    - Depth maps encode scene geometry (what's near, what's far)
-    - ControlNet adds spatial constraints WITHOUT retraining the base model
-    - The base SDXL model provides photorealism, ControlNet provides layout
-    - Combined: photorealistic images with correct spatial relationships
-
-    VRAM usage: ~10-12GB on T4 (SDXL ~6.5GB + ControlNet ~2GB + generation buffers)
+    VRAM: ~12GB without IP-Adapter, ~14GB with IP-Adapter
     """
 
-    def __init__(self, vram_manager: Optional[VRAMManager] = None):
+    def __init__(self, vram_manager: Optional[VRAMManager] = None, use_ip_adapter: bool = False):
         self.vram = vram_manager or VRAMManager()
         self.device = self.vram.device
         self.pipe = None
+        self.use_ip_adapter = use_ip_adapter
+        self._ip_adapter_loaded = False
 
         self.negative_prompt = (
             "cartoon, anime, drawing, painting, illustration, "
@@ -59,7 +58,18 @@ class ControlNetGenerator:
         )
 
         self.pipe = self.pipe.to(self.device)
-        self.pipe.enable_attention_slicing()
+
+        # IP-Adapter: reference image style conditioning (arxiv 2308.06721)
+        if self.use_ip_adapter:
+            print("Loading IP-Adapter for style conditioning...")
+            self.pipe.load_ip_adapter(
+                "h94/IP-Adapter",
+                subfolder="sdxl_models",
+                weight_name="ip-adapter_sdxl.bin",
+            )
+            self.pipe.set_ip_adapter_scale(0.35)
+            self._ip_adapter_loaded = True
+            print("IP-Adapter loaded (scale=0.35)")
 
         self.vram.register("controlnet_sdxl", self.pipe)
         self.vram.snapshot("after_controlnet_load")
@@ -79,7 +89,8 @@ class ControlNetGenerator:
         width: int = 1024,
         num_inference_steps: int = 30,
         guidance_scale: float = 7.0,
-        controlnet_conditioning_scale: float = 0.5,
+        controlnet_conditioning_scale: float = 0.25,
+        ip_adapter_image: Optional[Image.Image] = None,
     ) -> Image.Image:
         """Generate a depth-conditioned dashcam image.
 
@@ -92,7 +103,10 @@ class ControlNetGenerator:
             guidance_scale: How strictly to follow the text prompt (7.0 is balanced)
             controlnet_conditioning_scale: How strongly depth constrains generation.
                 0.0 = ignore depth (like raw SDXL), 1.0 = strict depth adherence.
-                0.5 = balanced (recommended starting point).
+                0.25 = gentle guidance (prevents tiling from programmatic depth maps).
+            ip_adapter_image: Optional reference dashcam image for style transfer.
+                Transfers lighting, color grading, lens characteristics from a real
+                dashcam photo. Requires use_ip_adapter=True in constructor.
 
         Returns:
             Generated PIL Image
@@ -107,7 +121,7 @@ class ControlNetGenerator:
         print(f"Generating (ControlNet): {prompt[:80]}...")
         self.vram.snapshot("before_controlnet_generate")
 
-        image = self.pipe(
+        pipe_kwargs = dict(
             prompt=prompt,
             negative_prompt=self.negative_prompt,
             image=depth_image,
@@ -116,7 +130,13 @@ class ControlNetGenerator:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
-        ).images[0]
+        )
+
+        # Add IP-Adapter reference image if available
+        if ip_adapter_image is not None and self._ip_adapter_loaded:
+            pipe_kwargs["ip_adapter_image"] = ip_adapter_image
+
+        image = self.pipe(**pipe_kwargs).images[0]
 
         self.vram.snapshot("after_controlnet_generate")
         return image
@@ -125,7 +145,7 @@ class ControlNetGenerator:
         self,
         scenario,
         depth_image: Image.Image,
-        controlnet_conditioning_scale: float = 0.5,
+        controlnet_conditioning_scale: float = 0.25,
     ) -> Image.Image:
         """Generate a driving scene from a CrashScenario + depth map.
 
@@ -155,7 +175,7 @@ class ControlNetGenerator:
         self,
         scenario,
         depth_image: Image.Image,
-        controlnet_conditioning_scale: float = 0.5,
+        controlnet_conditioning_scale: float = 0.25,
     ) -> dict[str, Image.Image]:
         """Generate multiple keyframes for a crash scenario timeline.
 

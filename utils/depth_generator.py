@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from PIL import Image
+from scipy.ndimage import gaussian_filter
 from typing import Optional
 from utils.vram_manager import VRAMManager
 
@@ -104,6 +105,10 @@ class DepthGenerator:
         for obj in objects:
             depth = self._place_object_in_depth(depth, obj, image_width, image_height)
 
+        # Apply Gaussian blur to the final depth map to prevent ControlNet
+        # from seeing any remaining hard edges (prevents tiling artifacts)
+        depth = gaussian_filter(depth, sigma=8.0)
+
         return np.clip(depth, 0.0, 1.0)
 
     def _place_object_in_depth(
@@ -113,10 +118,11 @@ class DepthGenerator:
         img_w: int,
         img_h: int,
     ) -> np.ndarray:
-        """Place a single object into the depth map at the correct distance.
+        """Place a single object into the depth map using a 2D Gaussian blob.
 
-        Uses perspective projection: objects farther away appear higher in
-        the image and smaller (dashcam perspective geometry).
+        Uses perspective projection for position/scale, then stamps a smooth
+        Gaussian blob instead of a sharp rectangle. This prevents ControlNet
+        from seeing hard edges that cause tiling artifacts.
         """
         distance_m = obj.get("distance_m", 30.0)
         lateral = obj.get("lateral_position", 0.0)
@@ -124,14 +130,10 @@ class DepthGenerator:
         obj_height_frac = obj.get("height_fraction", 0.15)
 
         # Convert distance to depth value (0=near, 1=far)
-        # Use inverse mapping: depth = 1 - (1 / (1 + distance/50))
-        # At 0m → depth=0, at 50m → depth=0.5, at infinity → depth=1
         depth_value = 1.0 - (1.0 / (1.0 + distance_m / 50.0))
 
         # Perspective projection: farther objects appear higher and smaller
-        # Vanishing point at ~40% from top of dashcam image
         vanishing_y = 0.4
-        # Y position: interpolate between vanishing point and bottom based on distance
         scale_factor = 1.0 / (1.0 + distance_m / 10.0)
         center_y_frac = vanishing_y + (1.0 - vanishing_y) * scale_factor
 
@@ -140,38 +142,27 @@ class DepthGenerator:
 
         # Scale object size with distance (farther = smaller)
         size_scale = max(0.02, 1.0 / (1.0 + distance_m / 5.0))
-        w = int(img_w * obj_width_frac * size_scale * 3)
-        h = int(img_h * obj_height_frac * size_scale * 3)
+        sigma_x = img_w * obj_width_frac * size_scale * 1.5
+        sigma_y = img_h * obj_height_frac * size_scale * 1.5
 
         cx = int(center_x_frac * img_w)
         cy = int(center_y_frac * img_h)
 
-        x1 = max(0, cx - w // 2)
-        x2 = min(img_w, cx + w // 2)
-        y1 = max(0, cy - h // 2)
-        y2 = min(img_h, cy + h // 2)
+        # Create 2D Gaussian blob over the full image (vectorized, fast)
+        y_coords = np.arange(img_h)
+        x_coords = np.arange(img_w)
+        xx, yy = np.meshgrid(x_coords, y_coords)
 
-        if x2 > x1 and y2 > y1:
-            # Blend the object depth into the scene
-            # Objects are CLOSER than background, so they should have LOWER depth values
-            object_depth = depth_value
-            # Smooth rectangular region with soft edges
-            region = depth[y1:y2, x1:x2]
-            mask = np.ones_like(region)
-            # Feather edges for natural blending
-            feather = max(1, min(w, h) // 4)
-            for i in range(feather):
-                alpha = (i + 1) / feather
-                if i < region.shape[0]:
-                    mask[i, :] *= alpha
-                if region.shape[0] - 1 - i >= 0:
-                    mask[region.shape[0] - 1 - i, :] *= alpha
-                if i < region.shape[1]:
-                    mask[:, i] *= alpha
-                if region.shape[1] - 1 - i >= 0:
-                    mask[:, region.shape[1] - 1 - i] *= alpha
+        # Clamp sigma to avoid division by zero or tiny blobs
+        sigma_x = max(sigma_x, 3.0)
+        sigma_y = max(sigma_y, 3.0)
 
-            depth[y1:y2, x1:x2] = region * (1 - mask) + object_depth * mask
+        gaussian = np.exp(
+            -0.5 * (((xx - cx) / sigma_x) ** 2 + ((yy - cy) / sigma_y) ** 2)
+        )
+
+        # Blend: where Gaussian is strong, pull depth toward object_depth
+        depth = depth * (1.0 - gaussian) + depth_value * gaussian
 
         return depth
 
@@ -195,31 +186,28 @@ class DepthGenerator:
         """
         depth = np.zeros((height, width), dtype=np.float32)
 
-        # Sky region (top ~40%) — farthest
-        vanishing_row = int(height * 0.4)
-        depth[:vanishing_row, :] = 1.0
+        # Smooth gradient from top (far=1.0) to bottom (near=0.0)
+        # No hard sky/road boundary — smooth transition prevents ControlNet artifacts
+        for row in range(height):
+            depth[row, :] = 1.0 - (row / height)
 
-        # Road surface: gradient from vanishing point (far) to bottom (near)
-        for row in range(vanishing_row, height):
-            progress = (row - vanishing_row) / (height - vanishing_row)
-            depth[row, :] = 1.0 - progress  # near at bottom
-
-        # Road-type-specific adjustments
+        # Road-type-specific adjustments (subtle, blended)
         if road_type in ("highway", "urban"):
-            # Add slight depth variation for lane markings area (center is road)
             center_start = width // 4
             center_end = 3 * width // 4
-            side_depth_offset = 0.05  # sides are slightly nearer (guardrails, buildings)
-            for row in range(vanishing_row, height):
-                progress = (row - vanishing_row) / (height - vanishing_row)
+            side_depth_offset = 0.03
+            for row in range(height // 2, height):
+                progress = (row - height // 2) / (height // 2)
                 depth[row, :center_start] -= side_depth_offset * progress
                 depth[row, center_end:] -= side_depth_offset * progress
 
         if road_type == "intersection":
-            # Cross-road area: depth anomaly in the middle where cross-traffic goes
             cross_y_start = int(height * 0.55)
             cross_y_end = int(height * 0.65)
-            depth[cross_y_start:cross_y_end, :] *= 0.9
+            depth[cross_y_start:cross_y_end, :] *= 0.95
+
+        # Smooth the base depth map
+        depth = gaussian_filter(depth, sigma=12.0)
 
         return np.clip(depth, 0.0, 1.0)
 

@@ -162,18 +162,83 @@ class ScenarioEvaluator:
             "all_detections": detections,
         }
 
+    def temporal_clip_consistency(self, frames: list[Image.Image], text: str = "") -> dict:
+        """Measure CLIP embedding consistency across video frames.
+
+        Computes CLIP embeddings for each frame and reports:
+        - Mean pairwise cosine similarity (higher = more consistent video)
+        - Per-frame CLIP score against text prompt (if provided)
+
+        This is a video-level quality metric: temporally consistent videos
+        have high frame-to-frame CLIP similarity.
+
+        Args:
+            frames: List of video frame PIL Images
+            text: Optional text prompt to score each frame against
+
+        Returns:
+            Dict with consistency metrics
+        """
+        if self._clip_model is None:
+            self._load_clip()
+
+        # Sample frames to avoid excessive computation (max 10 frames)
+        step = max(1, len(frames) // 10)
+        sampled = frames[::step][:10]
+
+        embeddings = []
+        per_frame_scores = []
+
+        for frame in sampled:
+            inputs = self._clip_processor(
+                images=[frame], return_tensors="pt"
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                img_emb = self._clip_model.get_image_features(**inputs)
+                img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
+                embeddings.append(img_emb)
+
+            if text:
+                per_frame_scores.append(self.clip_score(frame, text))
+
+        # Compute pairwise cosine similarities
+        if len(embeddings) > 1:
+            emb_stack = torch.cat(embeddings, dim=0)
+            sim_matrix = torch.mm(emb_stack, emb_stack.T)
+            # Extract upper triangle (excluding diagonal)
+            n = sim_matrix.shape[0]
+            mask = torch.triu(torch.ones(n, n, dtype=torch.bool), diagonal=1)
+            pairwise_sims = sim_matrix[mask].tolist()
+            mean_consistency = round(float(np.mean(pairwise_sims)), 4)
+            min_consistency = round(float(np.min(pairwise_sims)), 4)
+        else:
+            mean_consistency = 1.0
+            min_consistency = 1.0
+
+        return {
+            "mean_frame_consistency": mean_consistency,
+            "min_frame_consistency": min_consistency,
+            "num_frames_sampled": len(sampled),
+            "per_frame_clip_scores": per_frame_scores if per_frame_scores else None,
+            "mean_frame_clip_score": round(float(np.mean(per_frame_scores)), 4) if per_frame_scores else None,
+        }
+
     def evaluate_scenario(
         self,
         image: Image.Image,
         scenario,
         label: str = "",
+        video_frames: Optional[list[Image.Image]] = None,
     ) -> dict:
-        """Full evaluation of a generated scenario image.
+        """Full evaluation of a generated scenario image + optional video.
 
         Args:
             image: Generated image
             scenario: CrashScenario with prompt and expected objects
             label: Optional label for this evaluation (e.g., "controlnet", "raw_sdxl")
+            video_frames: Optional list of video frame images for temporal eval
 
         Returns:
             Complete evaluation report as dict
@@ -197,6 +262,13 @@ class ScenarioEvaluator:
             "expected_objects": expected,
             "quality_assessment": self._assess_quality(clip, obj_verify),
         }
+
+        # Video-level evaluation (if frames provided)
+        if video_frames and len(video_frames) > 1:
+            prompt_text = scenario.image_prompt or scenario.description
+            report["video_metrics"] = self.temporal_clip_consistency(
+                video_frames, text=prompt_text
+            )
 
         return report
 

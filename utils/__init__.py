@@ -3,5 +3,9 @@ from utils.vram_manager import VRAMManager
 from utils.depth_generator import DepthGenerator
 from utils.controlnet_generator import ControlNetGenerator
 from utils.video_generator import VideoGenerator
+from utils.ctrl_crash_generator import CtrlCrashGenerator
+from utils.wan_video_generator import WanVideoGenerator
+from utils.bbox_prompt import BboxPromptAugmenter
+from utils.bbox_sequence_generator import BboxSequenceGenerator
 from utils.evaluator import ScenarioEvaluator
 from utils.pipeline import CrashScenePipeline

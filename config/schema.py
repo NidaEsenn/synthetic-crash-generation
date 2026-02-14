@@ -84,6 +84,18 @@ class CrashScenario(BaseModel):
         description="How the scene evolves over 5 seconds: what approaches, what changes"
     )
 
+    # Ctrl-Crash conditioning (arxiv 2506.00227)
+    crash_type_token: str = Field(
+        default="",
+        description="Ctrl-Crash crash type: head_on, rear_end, side_impact, t_bone, pedestrian, single_vehicle"
+    )
+
+    # GeoDiffusion-style bbox augmented prompt (arxiv 2306.04607)
+    bbox_augmented_prompt: str = Field(
+        default="",
+        description="Image prompt enriched with bbox position tokens, e.g. 'car at [0.3,0.4,0.6,0.7]'"
+    )
+
     # Metadata
     description: str = Field(default="", description="Original text description")
     image_prompt: str = Field(default="", description="Rich Stable Diffusion prompt for image generation")

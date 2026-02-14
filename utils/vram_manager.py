@@ -13,15 +13,23 @@ class VRAMSnapshot:
     peak_mb: float
 
 
+GPU_PROFILES = {
+    "t4": 15360,       # 15 GB
+    "a100_40": 40960,  # 40 GB
+    "a100_80": 81920,  # 80 GB
+    "v100": 16384,     # 16 GB
+    "h200": 143360,    # 140 GB
+}
+
+
 class VRAMManager:
     """Manages GPU memory across multi-model pipeline stages.
 
-    On a T4 (15GB usable VRAM), we can't load multiple large models
-    simultaneously. This manager handles sequential loading/unloading
-    and profiles memory at each stage for reporting.
+    Supports configurable GPU profiles for accurate headroom reporting.
+    Default: A100 40GB (Northeastern HPC). Use gpu_profile="t4" for Colab.
     """
 
-    def __init__(self, device: Optional[str] = None):
+    def __init__(self, device: Optional[str] = None, gpu_profile: str = "a100_40"):
         if device:
             self.device = device
         elif torch.cuda.is_available():
@@ -31,6 +39,8 @@ class VRAMManager:
         else:
             self.device = "cpu"
 
+        self.gpu_profile = gpu_profile
+        self.gpu_total_mb = GPU_PROFILES.get(gpu_profile, 40960)
         self.snapshots: list[VRAMSnapshot] = []
         self._active_models: dict[str, object] = {}
 
@@ -88,7 +98,9 @@ class VRAMManager:
                 for s in self.snapshots
             ],
             "peak_overall_mb": peak_overall,
-            "t4_headroom_mb": round(15360 - peak_overall, 1) if self.device == "cuda" else None,
+            "gpu_profile": self.gpu_profile,
+            "gpu_total_mb": self.gpu_total_mb,
+            "headroom_mb": round(self.gpu_total_mb - peak_overall, 1) if self.device == "cuda" else None,
         }
 
     def print_report(self):
@@ -98,8 +110,8 @@ class VRAMManager:
         for s in r["stages"]:
             print(f"  [{s['stage']}] allocated={s['allocated_mb']}MB  peak={s['peak_mb']}MB")
         print(f"  Peak overall: {r['peak_overall_mb']}MB")
-        if r["t4_headroom_mb"] is not None:
-            print(f"  T4 headroom: {r['t4_headroom_mb']}MB remaining")
+        if r["headroom_mb"] is not None:
+            print(f"  {r['gpu_profile'].upper()} headroom: {r['headroom_mb']}MB / {r['gpu_total_mb']}MB")
         print("---\n")
 
 

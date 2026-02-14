@@ -4,11 +4,13 @@ torchvision
 transformers
 diffusers
 accelerate
+ip-adapter  # Reference image style conditioning (arxiv 2308.06721)
 
 # Image processing
 opencv-python
 pillow
 numpy
+scipy  # Gaussian blur for smooth depth maps
 
 # API & utilities
 openai
