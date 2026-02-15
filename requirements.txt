@@ -17,6 +17,10 @@ openai
 pydantic
 python-dotenv
 
+# LoRA fine-tuning
+peft  # Parameter-Efficient Fine-Tuning (LoRA adapters)
+datasets  # HuggingFace datasets for BDD100K loading
+
 # Evaluation
 ultralytics  # YOLOv8 for object detection verification
 

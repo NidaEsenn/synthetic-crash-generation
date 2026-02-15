@@ -52,6 +52,7 @@ class CrashScenePipeline:
         skip_video: bool = False,
         skip_eval: bool = False,
         gpu_profile: str = "a100_40",
+        lora_weights: Optional[str] = None,
     ):
         """
         Args:
@@ -62,6 +63,7 @@ class CrashScenePipeline:
             skip_video: If True, only generate images
             skip_eval: If True, skip evaluation
             gpu_profile: GPU profile for VRAM tracking ("a100_40", "t4", etc.)
+            lora_weights: Path to LoRA weights for dashcam fine-tuned SDXL
         """
         self.output_dir = output_dir
         self.video_backend = video_backend
@@ -81,6 +83,7 @@ class CrashScenePipeline:
         self.controlnet_gen = ControlNetGenerator(
             vram_manager=self.vram,
             use_ip_adapter=use_ip_adapter,
+            lora_weights=lora_weights,
         )
         self.bbox_augmenter = BboxPromptAugmenter()
         self.bbox_seq_gen = BboxSequenceGenerator()

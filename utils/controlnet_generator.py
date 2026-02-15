@@ -1,3 +1,4 @@
+import os
 import torch
 from PIL import Image
 from typing import Optional
@@ -20,11 +21,17 @@ class ControlNetGenerator:
     VRAM: ~12GB without IP-Adapter, ~14GB with IP-Adapter
     """
 
-    def __init__(self, vram_manager: Optional[VRAMManager] = None, use_ip_adapter: bool = False):
+    def __init__(
+        self,
+        vram_manager: Optional[VRAMManager] = None,
+        use_ip_adapter: bool = False,
+        lora_weights: Optional[str] = None,
+    ):
         self.vram = vram_manager or VRAMManager()
         self.device = self.vram.device
         self.pipe = None
         self.use_ip_adapter = use_ip_adapter
+        self.lora_weights = lora_weights
         self._ip_adapter_loaded = False
 
         self.negative_prompt = (
@@ -70,6 +77,13 @@ class ControlNetGenerator:
             self.pipe.set_ip_adapter_scale(0.35)
             self._ip_adapter_loaded = True
             print("IP-Adapter loaded (scale=0.35)")
+
+        # LoRA: dashcam fine-tuned weights (arxiv 2106.09685)
+        if self.lora_weights and os.path.exists(self.lora_weights):
+            print(f"Loading LoRA weights from {self.lora_weights}...")
+            self.pipe.load_lora_weights(self.lora_weights)
+            self.pipe.fuse_lora()  # Merge for faster inference
+            print("LoRA weights loaded and fused")
 
         self.vram.register("controlnet_sdxl", self.pipe)
         self.vram.snapshot("after_controlnet_load")
