@@ -50,10 +50,11 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
 
     print(f"Loading BDD100K from HuggingFace (first {num_images} images)...")
 
-    # BDD100K on HuggingFace (dgural/bdd100k)
+    # BDD100K on HuggingFace — streaming mode to avoid downloading all 20K files
     ds = load_dataset(
         "dgural/bdd100k",
-        split=f"train[:{num_images}]",
+        split="train",
+        streaming=True,
         trust_remote_code=True,
     )
 
@@ -61,6 +62,9 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
     saved_paths = []
 
     for i, sample in enumerate(ds):
+        if i >= num_images:
+            break
+
         img = sample["image"]
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -70,7 +74,7 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
 
         filename = f"img_{i:04d}.png"
         path = os.path.join(output_dir, filename)
-        img.save(path)
+        img.save(path, "JPEG", quality=95)  # JPEG is faster than PNG
         saved_paths.append(path)
 
         if (i + 1) % 50 == 0:
