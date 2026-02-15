@@ -50,10 +50,11 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
 
     print(f"Loading BDD100K from HuggingFace (first {num_images} images)...")
 
-    # BDD100K on HuggingFace — large dataset, we stream to avoid downloading all
+    # BDD100K on HuggingFace (dgural/bdd100k)
     ds = load_dataset(
-        "sayakpaul/bdd100k",
+        "dgural/bdd100k",
         split=f"train[:{num_images}]",
+        trust_remote_code=True,
     )
 
     os.makedirs(output_dir, exist_ok=True)
