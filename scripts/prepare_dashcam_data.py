@@ -1,10 +1,11 @@
-"""Prepare dashcam image dataset for SDXL LoRA fine-tuning.
+"""Prepare dashcam crash dataset for SDXL LoRA fine-tuning.
 
-Two modes:
-1. AUTO: Download dashcam images from HuggingFace BDD100K subset
-2. LOCAL: Use your own folder of dashcam images
+Three modes:
+1. NEXAR: Download collision dashcam videos from Nexar dataset, extract crash-moment frames
+2. BDD100K: Download general driving images from BDD100K
+3. LOCAL: Use your own folder of dashcam images
 
-Then auto-caption each image using BLIP-2 and create
+Then auto-caption each image using BLIP and create
 a metadata.jsonl file in HuggingFace Dataset format.
 
 Output structure:
@@ -12,18 +13,18 @@ Output structure:
     ├── img_0001.png
     ├── img_0002.png
     ├── ...
-    └── metadata.jsonl   ← {"file_name": "img_0001.png", "text": "a dashcam photo of..."}
+    └── metadata.jsonl   ← {"file_name": "img_0001.png", "text": "dashcam photo of..."}
 
 Usage:
-    # From HuggingFace (recommended for HPC):
-    python scripts/prepare_dashcam_data.py --source hf --num_images 500
+    # Nexar crash videos (recommended):
+    python scripts/prepare_dashcam_data.py --source nexar --num_images 500
 
-    # From local folder:
-    python scripts/prepare_dashcam_data.py --source local --input_dir /path/to/dashcam_images
+    # BDD100K general driving:
+    python scripts/prepare_dashcam_data.py --source bdd100k --num_images 500
 
     # From Jupyter:
-    from scripts.prepare_dashcam_data import prepare_dataset
-    prepare_dataset(source="hf", num_images=500)
+    from prepare_dashcam_data import prepare_dataset
+    prepare_dataset(source="nexar", num_images=500)
 """
 
 import os
@@ -33,24 +34,117 @@ from pathlib import Path
 from PIL import Image
 
 
-def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]:
-    """Download a subset of BDD100K dashcam images from HuggingFace.
+def download_nexar_crash_frames(output_dir: str, num_images: int = 500) -> list[str]:
+    """Extract crash-moment frames from Nexar collision prediction videos.
 
-    BDD100K is the largest open driving dataset with 100K dashcam images.
-    We download a small subset for LoRA training.
+    Nexar dataset (arxiv 2503.03848) contains 1500 real dashcam videos:
+    - 750 collision/near-miss videos with time_of_event timestamps
+    - 750 normal driving videos
+    - 1280x720, 30fps, ~40 seconds each
+
+    For each collision video, we extract multiple frames around the
+    crash moment (before, during, after) to capture the full progression.
 
     Args:
-        output_dir: Directory to save images
-        num_images: Number of images to download (200-1000 recommended)
+        output_dir: Directory to save extracted frames
+        num_images: Target number of frames to extract
 
     Returns:
         List of saved image paths
     """
     from datasets import load_dataset
+    import numpy as np
+
+    print(f"Loading Nexar Collision Prediction dataset...")
+
+    ds = load_dataset(
+        "nexar-ai/nexar_collision_prediction",
+        split="train",
+        streaming=True,
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths = []
+    img_counter = 0
+
+    # We extract frames from collision videos (label=1)
+    # For each video: 5 frames around the event time
+    #   -3s, -1s, event, +1s, +3s
+    frames_per_video = 5
+    max_videos = (num_images // frames_per_video) + 1
+
+    video_count = 0
+
+    for sample in ds:
+        if img_counter >= num_images:
+            break
+
+        # Only use collision videos (label=1) — these have crash scenes
+        label = sample.get("label")
+        if label != 1:
+            continue
+
+        video_count += 1
+        time_of_event = sample.get("time_of_event", 20.0)
+        weather = sample.get("weather", "unknown")
+        scene = sample.get("scene", "unknown")
+        light = sample.get("light_conditions", "unknown")
+
+        try:
+            video = sample["video"]
+
+            # video is a list of PIL Images (frames decoded by datasets)
+            total_frames = len(video)
+            fps = 30  # Nexar videos are 30fps
+
+            event_frame = int(time_of_event * fps)
+            event_frame = min(event_frame, total_frames - 1)
+
+            # Extract frames at: -3s, -1s, event, +1s, +3s
+            offsets_seconds = [-3, -1, 0, 1, 3]
+            for offset in offsets_seconds:
+                if img_counter >= num_images:
+                    break
+
+                frame_idx = event_frame + int(offset * fps)
+                frame_idx = max(0, min(frame_idx, total_frames - 1))
+
+                frame = video[frame_idx]
+                if not isinstance(frame, Image.Image):
+                    frame = Image.fromarray(frame)
+
+                if frame.mode != "RGB":
+                    frame = frame.convert("RGB")
+
+                frame = center_crop_resize(frame, 1024)
+
+                filename = f"img_{img_counter:04d}.png"
+                path = os.path.join(output_dir, filename)
+                frame.save(path, "JPEG", quality=95)
+                saved_paths.append(path)
+                img_counter += 1
+
+        except Exception as e:
+            print(f"  Skipping video {video_count}: {e}")
+            continue
+
+        if video_count % 10 == 0:
+            print(f"  Processed {video_count} videos, extracted {img_counter} frames")
+
+    print(f"Extracted {len(saved_paths)} frames from {video_count} Nexar collision videos")
+    return saved_paths
+
+
+def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]:
+    """Download a subset of BDD100K dashcam images from HuggingFace.
+
+    BDD100K has general driving scenes — good for learning dashcam style
+    but doesn't contain crash-specific content.
+    """
+    from datasets import load_dataset
 
     print(f"Loading BDD100K from HuggingFace (first {num_images} images)...")
 
-    # BDD100K on HuggingFace — streaming mode to avoid downloading all 20K files
     ds = load_dataset(
         "dgural/bdd100k",
         split="train",
@@ -69,12 +163,11 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Resize to 1024x1024 for SDXL (crop center)
         img = center_crop_resize(img, 1024)
 
         filename = f"img_{i:04d}.png"
         path = os.path.join(output_dir, filename)
-        img.save(path, "JPEG", quality=95)  # JPEG is faster than PNG
+        img.save(path, "JPEG", quality=95)
         saved_paths.append(path)
 
         if (i + 1) % 50 == 0:
@@ -85,16 +178,7 @@ def download_bdd100k_subset(output_dir: str, num_images: int = 500) -> list[str]
 
 
 def load_local_images(input_dir: str, output_dir: str, num_images: int = 500) -> list[str]:
-    """Load and preprocess dashcam images from a local folder.
-
-    Args:
-        input_dir: Directory containing dashcam images
-        output_dir: Directory to save processed images
-        num_images: Maximum number of images to use
-
-    Returns:
-        List of saved image paths
-    """
+    """Load and preprocess dashcam images from a local folder."""
     os.makedirs(output_dir, exist_ok=True)
 
     extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -135,9 +219,9 @@ def center_crop_resize(img: Image.Image, size: int) -> Image.Image:
 
 
 def auto_caption_blip(image_paths: list[str], device: str = "cuda") -> list[str]:
-    """Generate captions for images using BLIP-2.
+    """Generate captions for images using BLIP.
 
-    BLIP-2 is a lightweight vision-language model (~3GB VRAM).
+    BLIP is a lightweight vision-language model (~1GB VRAM).
     It generates natural language descriptions of images.
 
     We prefix all captions with "dashcam photo, " to anchor
@@ -179,7 +263,6 @@ def auto_caption_blip(image_paths: list[str], device: str = "cuda") -> list[str]
 
         batch_captions = processor.batch_decode(outputs, skip_special_tokens=True)
 
-        # Prefix with dashcam context
         for caption in batch_captions:
             full_caption = f"dashcam photo, point of view from inside a car, {caption}"
             captions.append(full_caption)
@@ -216,7 +299,7 @@ def create_metadata(output_dir: str, image_paths: list[str], captions: list[str]
 
 
 def prepare_dataset(
-    source: str = "hf",
+    source: str = "nexar",
     input_dir: str = "",
     output_dir: str = "data/dashcam_lora",
     num_images: int = 500,
@@ -225,7 +308,7 @@ def prepare_dataset(
     """Full dataset preparation pipeline.
 
     Args:
-        source: "hf" for HuggingFace BDD100K, "local" for local folder
+        source: "nexar" for crash videos, "bdd100k" for general driving, "local" for local folder
         input_dir: Path to local images (only for source="local")
         output_dir: Where to save processed dataset
         num_images: Number of images to use
@@ -242,14 +325,16 @@ def prepare_dataset(
     print(f"{'='*60}\n")
 
     # Step 1: Get images
-    if source == "hf":
+    if source == "nexar":
+        image_paths = download_nexar_crash_frames(output_dir, num_images)
+    elif source == "bdd100k":
         image_paths = download_bdd100k_subset(output_dir, num_images)
     elif source == "local":
         if not input_dir:
             raise ValueError("input_dir required for source='local'")
         image_paths = load_local_images(input_dir, output_dir, num_images)
     else:
-        raise ValueError(f"Unknown source: {source}. Use 'hf' or 'local'")
+        raise ValueError(f"Unknown source: {source}. Use 'nexar', 'bdd100k', or 'local'")
 
     # Step 2: Auto-caption
     captions = auto_caption_blip(image_paths, device=device)
@@ -267,7 +352,7 @@ def prepare_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare dashcam dataset for LoRA training")
-    parser.add_argument("--source", choices=["hf", "local"], default="hf")
+    parser.add_argument("--source", choices=["nexar", "bdd100k", "local"], default="nexar")
     parser.add_argument("--input_dir", type=str, default="")
     parser.add_argument("--output_dir", type=str, default="data/dashcam_lora")
     parser.add_argument("--num_images", type=int, default=500)
