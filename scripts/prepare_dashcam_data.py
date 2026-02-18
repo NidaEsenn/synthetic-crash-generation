@@ -1,9 +1,10 @@
 """Prepare dashcam crash dataset for SDXL LoRA fine-tuning.
 
-Three modes:
-1. NEXAR: Download collision dashcam videos from Nexar dataset, extract crash-moment frames
-2. BDD100K: Download general driving images from BDD100K
-3. LOCAL: Use your own folder of dashcam images
+Four modes:
+1. DOTA: Download traffic anomaly dashcam frames from DoTA dataset (RECOMMENDED)
+2. NEXAR: Download collision dashcam videos from Nexar dataset, extract crash-moment frames
+3. BDD100K: Download general driving images from BDD100K
+4. LOCAL: Use your own folder of dashcam images
 
 Then auto-caption each image using BLIP and create
 a metadata.jsonl file in HuggingFace Dataset format.
@@ -32,6 +33,123 @@ import json
 import argparse
 from pathlib import Path
 from PIL import Image
+
+
+def download_dota_frames(output_dir: str, num_images: int = 500) -> list[str]:
+    """Download traffic anomaly dashcam frames from DoTA dataset.
+
+    DoTA (Detection of Traffic Anomaly) contains 4,677 real dashcam videos
+    with 18 anomaly categories (collision, pedestrian, vehicle turning, etc.)
+    Pre-extracted JPG frames are available on Google Drive.
+
+    The 55GB dataset is split into 5×10GB + 1×5GB archives.
+    We download the smallest split and extract frames from it.
+
+    GitHub: https://github.com/MoonBlvd/Detection-of-Traffic-Anomaly
+
+    Args:
+        output_dir: Directory to save extracted frames
+        num_images: Target number of frames to extract
+
+    Returns:
+        List of saved image paths
+    """
+    import subprocess
+    import tarfile
+    import random
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Google Drive folder with split archives
+    gdrive_folder = "1_WzhwZC2NIpzZIpX7YCvapq66rtBc67n"
+    temp_dir = os.path.join(output_dir, "_temp_dota")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    print("Downloading DoTA frames from Google Drive...")
+    print("  (This may take 5-10 minutes for the first archive)")
+
+    # Use gdown to download from the split files folder
+    try:
+        subprocess.run(
+            ["pip", "install", "--user", "-q", "gdown"],
+            capture_output=True,
+        )
+        import gdown
+
+        # Download the folder listing and get the smallest file
+        # Direct link to the split folder
+        url = f"https://drive.google.com/drive/folders/{gdrive_folder}"
+        gdown.download_folder(url, output=temp_dir, quiet=False, remaining_ok=True)
+
+    except Exception as e:
+        print(f"\n  gdown folder download failed: {e}")
+        print("  Trying single file download...")
+
+        # Fallback: download the main 55GB file (will be slow)
+        # Use the known file ID
+        file_id = "1RQp4hOP9X7TW6S3_vbqZvFSkrbbFzrRj"
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            os.path.join(temp_dir, "dota_frames.tar.gz"),
+            quiet=False,
+        )
+
+    # Find and extract archive(s)
+    print("Extracting frames...")
+    all_frames = []
+    archives = sorted(Path(temp_dir).glob("*.tar.gz")) + sorted(Path(temp_dir).glob("*.zip"))
+
+    if not archives:
+        # Maybe frames were extracted directly
+        archives = []
+        all_frames = sorted(Path(temp_dir).rglob("*.jpg")) + sorted(Path(temp_dir).rglob("*.png"))
+
+    for archive in archives:
+        print(f"  Extracting {archive.name}...")
+        try:
+            if str(archive).endswith(".tar.gz"):
+                with tarfile.open(archive, "r:gz") as tar:
+                    tar.extractall(path=temp_dir)
+            elif str(archive).endswith(".zip"):
+                import zipfile
+                with zipfile.ZipFile(archive, "r") as z:
+                    z.extractall(temp_dir)
+        except Exception as e:
+            print(f"  Warning: extraction error: {e}")
+            continue
+
+    # Collect all extracted JPG/PNG frames
+    if not all_frames:
+        all_frames = sorted(Path(temp_dir).rglob("*.jpg")) + sorted(Path(temp_dir).rglob("*.png"))
+
+    print(f"  Found {len(all_frames)} total frames")
+
+    if len(all_frames) == 0:
+        raise RuntimeError("No frames found after extraction. Check DoTA download.")
+
+    # Sample randomly for diversity
+    if len(all_frames) > num_images:
+        random.seed(42)
+        selected = random.sample(all_frames, num_images)
+    else:
+        selected = all_frames[:num_images]
+
+    # Process and save
+    saved_paths = []
+    for i, frame_path in enumerate(selected):
+        img = Image.open(frame_path).convert("RGB")
+        img = center_crop_resize(img, 1024)
+
+        filename = f"img_{i:04d}.png"
+        path = os.path.join(output_dir, filename)
+        img.save(path, "JPEG", quality=95)
+        saved_paths.append(path)
+
+        if (i + 1) % 50 == 0:
+            print(f"  Processed {i + 1}/{len(selected)} frames")
+
+    print(f"Saved {len(saved_paths)} DoTA frames to {output_dir}")
+    return saved_paths
 
 
 def download_nexar_crash_frames(output_dir: str, num_images: int = 500) -> list[str]:
@@ -299,7 +417,7 @@ def create_metadata(output_dir: str, image_paths: list[str], captions: list[str]
 
 
 def prepare_dataset(
-    source: str = "nexar",
+    source: str = "dota",
     input_dir: str = "",
     output_dir: str = "data/dashcam_lora",
     num_images: int = 500,
@@ -308,7 +426,7 @@ def prepare_dataset(
     """Full dataset preparation pipeline.
 
     Args:
-        source: "nexar" for crash videos, "bdd100k" for general driving, "local" for local folder
+        source: "dota" for DoTA anomaly frames, "nexar" for crash videos, "bdd100k" for general driving, "local" for local folder
         input_dir: Path to local images (only for source="local")
         output_dir: Where to save processed dataset
         num_images: Number of images to use
@@ -325,7 +443,9 @@ def prepare_dataset(
     print(f"{'='*60}\n")
 
     # Step 1: Get images
-    if source == "nexar":
+    if source == "dota":
+        image_paths = download_dota_frames(output_dir, num_images)
+    elif source == "nexar":
         image_paths = download_nexar_crash_frames(output_dir, num_images)
     elif source == "bdd100k":
         image_paths = download_bdd100k_subset(output_dir, num_images)
@@ -334,7 +454,7 @@ def prepare_dataset(
             raise ValueError("input_dir required for source='local'")
         image_paths = load_local_images(input_dir, output_dir, num_images)
     else:
-        raise ValueError(f"Unknown source: {source}. Use 'nexar', 'bdd100k', or 'local'")
+        raise ValueError(f"Unknown source: {source}. Use 'dota', 'nexar', 'bdd100k', or 'local'")
 
     # Step 2: Auto-caption
     captions = auto_caption_blip(image_paths, device=device)
@@ -352,7 +472,7 @@ def prepare_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare dashcam dataset for LoRA training")
-    parser.add_argument("--source", choices=["nexar", "bdd100k", "local"], default="nexar")
+    parser.add_argument("--source", choices=["dota", "nexar", "bdd100k", "local"], default="dota")
     parser.add_argument("--input_dir", type=str, default="")
     parser.add_argument("--output_dir", type=str, default="data/dashcam_lora")
     parser.add_argument("--num_images", type=int, default=500)
