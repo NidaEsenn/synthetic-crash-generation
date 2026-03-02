@@ -31,7 +31,7 @@ import torch.nn.functional as F
 from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+import numpy as np
 
 
 class DashcamDataset(Dataset):
@@ -57,13 +57,6 @@ class DashcamDataset(Dataset):
 
         print(f"Loaded {len(self.entries)} training samples from {data_dir}")
 
-        self.transform = transforms.Compose([
-            transforms.Resize(resolution, interpolation=transforms.InterpolationMode.LANCZOS),
-            transforms.CenterCrop(resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),  # [-1, 1] range for diffusion
-        ])
-
     def __len__(self):
         return len(self.entries)
 
@@ -71,7 +64,18 @@ class DashcamDataset(Dataset):
         entry = self.entries[idx]
         img_path = os.path.join(self.data_dir, entry["file_name"])
         image = Image.open(img_path).convert("RGB")
-        image = self.transform(image)
+        # Resize + center crop (replaces torchvision transforms)
+        w, h = image.size
+        scale = self.resolution / min(w, h)
+        image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        w, h = image.size
+        left = (w - self.resolution) // 2
+        top = (h - self.resolution) // 2
+        image = image.crop((left, top, left + self.resolution, top + self.resolution))
+        # To tensor + normalize to [-1, 1]
+        image = np.array(image).astype(np.float32) / 255.0
+        image = (image - 0.5) / 0.5
+        image = torch.from_numpy(image).permute(2, 0, 1)  # HWC -> CHW
         return {"pixel_values": image, "caption": entry["text"]}
 
 
