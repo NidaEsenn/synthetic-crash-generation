@@ -35,6 +35,101 @@ from pathlib import Path
 from PIL import Image
 
 
+def download_ccd_frames(output_dir: str, num_images: int = 500) -> list[str]:
+    """Download crash frames from Car Crash Dataset (CCD) via Kaggle.
+
+    CCD contains frames extracted from 1,500 crash + 3,000 normal dashcam videos.
+    50 frames per video. File naming: C_000001_01.jpg (C=crash, N=normal).
+    Total ~75K+ crash frames. MIT license.
+
+    Kaggle: https://www.kaggle.com/datasets/asefjamilajwad/car-crash-dataset-ccd
+
+    Requires: ~/.kaggle/kaggle.json with API credentials.
+
+    Args:
+        output_dir: Directory to save extracted frames
+        num_images: Target number of crash frames to extract
+
+    Returns:
+        List of saved image paths
+    """
+    import subprocess
+    import zipfile
+    import random
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    temp_dir = os.path.join(output_dir, "_temp_ccd")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    print("Downloading CCD from Kaggle...")
+    print("  (This may take 5-10 minutes for 8GB dataset)")
+
+    # Download via kaggle CLI
+    try:
+        result = subprocess.run(
+            ["kaggle", "datasets", "download",
+             "-d", "asefjamilajwad/car-crash-dataset-ccd",
+             "-p", temp_dir, "--unzip"],
+            capture_output=True, text=True, timeout=1800,  # 30 min timeout
+        )
+        if result.returncode != 0:
+            print(f"  kaggle CLI output: {result.stderr}")
+            raise RuntimeError(f"Kaggle download failed: {result.stderr}")
+    except FileNotFoundError:
+        raise RuntimeError(
+            "kaggle CLI not found. Install with: pip install --user kaggle\n"
+            "Then set up API key: https://www.kaggle.com/settings → Create New Token\n"
+            "Save to ~/.kaggle/kaggle.json"
+        )
+
+    # Find all crash frames (files starting with C_)
+    all_crash_frames = sorted(
+        list(Path(temp_dir).rglob("C_*.jpg")) +
+        list(Path(temp_dir).rglob("C_*.png"))
+    )
+
+    # If no C_ prefix files, try looking for a Crash subfolder
+    if not all_crash_frames:
+        all_crash_frames = sorted(
+            list(Path(temp_dir).rglob("*.jpg")) +
+            list(Path(temp_dir).rglob("*.png"))
+        )
+
+    print(f"  Found {len(all_crash_frames)} crash frames")
+
+    if len(all_crash_frames) == 0:
+        raise RuntimeError("No crash frames found in CCD dataset. Check download.")
+
+    # Sample randomly for diversity
+    if len(all_crash_frames) > num_images:
+        random.seed(42)
+        selected = random.sample(all_crash_frames, num_images)
+    else:
+        selected = all_crash_frames[:num_images]
+
+    # Process and save
+    saved_paths = []
+    for i, frame_path in enumerate(selected):
+        img = Image.open(frame_path).convert("RGB")
+        img = center_crop_resize(img, 1024)
+
+        filename = f"img_{i:04d}.png"
+        path = os.path.join(output_dir, filename)
+        img.save(path, "JPEG", quality=95)
+        saved_paths.append(path)
+
+        if (i + 1) % 50 == 0:
+            print(f"  Processed {i + 1}/{len(selected)} frames")
+
+    # Clean up temp to save disk
+    import shutil
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    print(f"Saved {len(saved_paths)} CCD crash frames to {output_dir}")
+    return saved_paths
+
+
 def download_dota_frames(output_dir: str, num_images: int = 500) -> list[str]:
     """Download traffic anomaly dashcam frames from DoTA dataset.
 
@@ -426,7 +521,7 @@ def prepare_dataset(
     """Full dataset preparation pipeline.
 
     Args:
-        source: "dota" for DoTA anomaly frames, "nexar" for crash videos, "bdd100k" for general driving, "local" for local folder
+        source: "ccd" for Car Crash Dataset (Kaggle), "dota" for DoTA anomaly frames, "nexar" for crash videos, "bdd100k" for general driving, "local" for local folder
         input_dir: Path to local images (only for source="local")
         output_dir: Where to save processed dataset
         num_images: Number of images to use
@@ -443,7 +538,9 @@ def prepare_dataset(
     print(f"{'='*60}\n")
 
     # Step 1: Get images
-    if source == "dota":
+    if source == "ccd":
+        image_paths = download_ccd_frames(output_dir, num_images)
+    elif source == "dota":
         image_paths = download_dota_frames(output_dir, num_images)
     elif source == "nexar":
         image_paths = download_nexar_crash_frames(output_dir, num_images)
@@ -454,7 +551,7 @@ def prepare_dataset(
             raise ValueError("input_dir required for source='local'")
         image_paths = load_local_images(input_dir, output_dir, num_images)
     else:
-        raise ValueError(f"Unknown source: {source}. Use 'dota', 'nexar', 'bdd100k', or 'local'")
+        raise ValueError(f"Unknown source: {source}. Use 'ccd', 'dota', 'nexar', 'bdd100k', or 'local'")
 
     # Step 2: Auto-caption
     captions = auto_caption_blip(image_paths, device=device)
@@ -472,7 +569,7 @@ def prepare_dataset(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare dashcam dataset for LoRA training")
-    parser.add_argument("--source", choices=["dota", "nexar", "bdd100k", "local"], default="dota")
+    parser.add_argument("--source", choices=["ccd", "dota", "nexar", "bdd100k", "local"], default="ccd")
     parser.add_argument("--input_dir", type=str, default="")
     parser.add_argument("--output_dir", type=str, default="data/dashcam_lora")
     parser.add_argument("--num_images", type=int, default=500)
