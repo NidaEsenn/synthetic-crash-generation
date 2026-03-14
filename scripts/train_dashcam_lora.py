@@ -53,9 +53,12 @@ class LoRALinear(nn.Module):
         in_features = original_linear.in_features
         out_features = original_linear.out_features
 
-        # LoRA matrices — only these are trainable
-        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
-        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        # LoRA matrices — on same device/dtype as original weights
+        device = original_linear.weight.device
+        dtype = original_linear.weight.dtype
+
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features, device=device, dtype=dtype))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank, device=device, dtype=dtype))
 
         # Initialize A with kaiming, B with zeros → LoRA starts as identity
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
