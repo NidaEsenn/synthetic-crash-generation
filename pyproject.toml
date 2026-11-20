@@ -1,7 +1,7 @@
 [project]
 name = "tesla-crash-synth"
 version = "0.1.0"
-description = "Add your description here"
+description = "Synthetic crash scene generation for autonomous-driving data"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
